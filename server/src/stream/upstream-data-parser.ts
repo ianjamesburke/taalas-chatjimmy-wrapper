@@ -21,15 +21,29 @@ const CODE_MAP = {
  * Parses one logical upstream line into typed events.
  * Supports chatjimmy's custom line protocol and regular SSE lines.
  */
-function parseLine(line: string): ParsedUpstreamEvent[] {
+function parseLine(
+  line: string,
+  terminator: string,
+  structured: boolean,
+): { events: ParsedUpstreamEvent[]; structured: boolean } {
   const trimmed = line.trim();
-  if (!trimmed) return [];
+  // Blank lines separate protocol/SSE records, but are real newlines in raw text.
+  if (!trimmed) {
+    return {
+      events:
+        structured || !(line + terminator)
+          ? []
+          : [{ type: "text", delta: line + terminator }],
+      structured,
+    };
+  }
   const dataProtocol = parseDataProtocolLine(trimmed);
-  if (dataProtocol.length > 0) return dataProtocol;
+  if (dataProtocol.length > 0)
+    return { events: dataProtocol, structured: true };
   const sse = parseSseLine(trimmed);
-  if (sse.length > 0) return sse;
-  // Preserve fallback text only when protocol parsing fails.
-  return [{ type: "text", delta: line }];
+  if (sse.length > 0) return { events: sse, structured: true };
+  // Raw text (chatjimmy's real wire format): keep the newline the split consumed.
+  return { events: [{ type: "text", delta: line + terminator }], structured };
 }
 
 /**
@@ -213,14 +227,22 @@ export function parseUpstreamChunk(chunk: string): ParsedUpstreamEvent[] {
  */
 export class UpstreamChunkParser {
   private buffer = "";
+  private structured = false;
+
+  private parse(line: string, terminator: string): ParsedUpstreamEvent[] {
+    const result = parseLine(line, terminator, this.structured);
+    this.structured = result.structured;
+    return result.events;
+  }
 
   parseChunk(chunk: string): ParsedUpstreamEvent[] {
     this.buffer += chunk;
-    const lines = this.buffer.split(/\r?\n/);
-    const trailing = lines.pop();
-    this.buffer = trailing ?? "";
+    // Capturing split keeps each line's terminator at the odd indices.
+    const parts = this.buffer.split(/(\r?\n)/);
+    this.buffer = parts.pop() ?? "";
     const events: ParsedUpstreamEvent[] = [];
-    for (const line of lines) events.push(...parseLine(line));
+    for (let i = 0; i < parts.length; i += 2)
+      events.push(...this.parse(parts[i], parts[i + 1]));
     return events;
   }
 
@@ -228,6 +250,6 @@ export class UpstreamChunkParser {
     if (!this.buffer) return [];
     const remaining = this.buffer;
     this.buffer = "";
-    return parseLine(remaining);
+    return this.parse(remaining, "");
   }
 }
